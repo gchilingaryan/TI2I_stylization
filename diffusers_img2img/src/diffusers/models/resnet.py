@@ -531,7 +531,10 @@ class ResnetBlock2D(nn.Module):
                 in_channels, conv_2d_out_channels, kernel_size=1, stride=1, padding=0, bias=conv_shortcut_bias
             )
 
-    def forward(self, input_tensor, temb):
+        self.conv1_layer = None
+        self.conv2_layer = None
+
+    def forward(self, input_tensor, temb, inject_features=None, alpha_blend=None):
         hidden_states = input_tensor
 
         if self.time_embedding_norm == "ada_group":
@@ -554,6 +557,19 @@ class ResnetBlock2D(nn.Module):
 
         hidden_states = self.conv1(hidden_states)
 
+        if inject_features:
+            conv1_input = inject_features[0]
+
+            if alpha_blend:
+                # blend
+                hidden_states = alpha_blend * hidden_states + (1 - alpha_blend) * conv1_input.to(hidden_states.device)
+            else:
+                #swap
+                swap = inject_features[2]
+                hidden_states = swap * hidden_states + (1 - swap) * conv1_input.to(hidden_states.device)
+
+        self.conv1_layer = hidden_states
+
         if self.time_emb_proj is not None:
             temb = self.time_emb_proj(self.nonlinearity(temb))[:, :, None, None]
 
@@ -573,6 +589,19 @@ class ResnetBlock2D(nn.Module):
 
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.conv2(hidden_states)
+
+        if inject_features:
+            conv2_input = inject_features[1]
+
+            if alpha_blend:
+                # blend
+                hidden_states = alpha_blend * hidden_states + (1 - alpha_blend) * conv2_input.to(hidden_states.device)
+            else:
+                # swap
+                swap = inject_features[2]
+                hidden_states = swap * hidden_states + (1 - swap) * conv2_input.to(hidden_states.device)
+
+        self.conv2_layer = hidden_states
 
         if self.conv_shortcut is not None:
             input_tensor = self.conv_shortcut(input_tensor)

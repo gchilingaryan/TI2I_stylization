@@ -219,6 +219,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         class_labels=None,
         cross_attention_kwargs=None,
         return_dict: bool = True,
+        inject_features=None,
+        alpha_blend=False,
     ):
         """
         Args:
@@ -268,6 +270,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
                 timestep=timestep,
                 cross_attention_kwargs=cross_attention_kwargs,
                 class_labels=class_labels,
+                inject_features=inject_features,
+                alpha_blend=alpha_blend,
             )
 
         # 3. Output

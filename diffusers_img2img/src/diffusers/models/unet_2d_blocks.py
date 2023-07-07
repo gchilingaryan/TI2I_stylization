@@ -18,7 +18,7 @@ import torch
 from torch import nn
 
 from .attention import AdaGroupNorm, AttentionBlock
-from .cross_attention import CrossAttention, CrossAttnAddedKVProcessor
+from .attention_processor import Attention, AttnAddedKVProcessor
 from .dual_transformer_2d import DualTransformer2DModel
 from .resnet import Downsample2D, FirDownsample2D, FirUpsample2D, KDownsample2D, KUpsample2D, ResnetBlock2D, Upsample2D
 from .transformer_2d import Transformer2DModel
@@ -533,7 +533,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
         self.resnets = nn.ModuleList(resnets)
 
     def forward(
-        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
+        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None, inject_features=None
     ):
         hidden_states = self.resnets[0](hidden_states, temb)
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
@@ -541,6 +541,7 @@ class UNetMidBlock2DCrossAttn(nn.Module):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 cross_attention_kwargs=cross_attention_kwargs,
+                inject_features=None,
             ).sample
             hidden_states = resnet(hidden_states, temb)
 
@@ -591,7 +592,7 @@ class UNetMidBlock2DSimpleCrossAttn(nn.Module):
 
         for _ in range(num_layers):
             attentions.append(
-                CrossAttention(
+                Attention(
                     query_dim=in_channels,
                     cross_attention_dim=in_channels,
                     heads=self.num_heads,
@@ -600,7 +601,7 @@ class UNetMidBlock2DSimpleCrossAttn(nn.Module):
                     norm_num_groups=resnet_groups,
                     bias=True,
                     upcast_softmax=True,
-                    processor=CrossAttnAddedKVProcessor(),
+                    processor=AttnAddedKVProcessor(),
                 )
             )
             resnets.append(
@@ -808,12 +809,20 @@ class CrossAttnDownBlock2D(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(
-        self, hidden_states, temb=None, encoder_hidden_states=None, attention_mask=None, cross_attention_kwargs=None
+        self,
+        hidden_states,
+        temb=None,
+        encoder_hidden_states=None,
+        attention_mask=None,
+        cross_attention_kwargs=None,
+        inject_features=None,
+        self_attention_layers=False,
+        alpha_blend=None
     ):
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()
 
-        for resnet, attn in zip(self.resnets, self.attentions):
+        for i, (resnet, attn) in enumerate(zip(self.resnets, self.attentions)):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module, return_dict=None):
@@ -833,11 +842,13 @@ class CrossAttnDownBlock2D(nn.Module):
                     cross_attention_kwargs,
                 )[0]
             else:
-                hidden_states = resnet(hidden_states, temb)
+                hidden_states = resnet(hidden_states, temb, inject_features=inject_features[f"resnet_{i}"] if not self_attention_layers and inject_features else None, alpha_blend=alpha_blend)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
+                    inject_features=inject_features[f"attention_{i}"] if self_attention_layers and inject_features else None,
+                    alpha_blend=alpha_blend,
                 ).sample
 
             output_states += (hidden_states,)
@@ -903,10 +914,10 @@ class DownBlock2D(nn.Module):
 
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states, temb=None):
+    def forward(self, hidden_states, temb=None, inject_features=None, self_attention_layers=False, alpha_blend=None):
         output_states = ()
 
-        for resnet in self.resnets:
+        for i, resnet in enumerate(self.resnets):
             if self.training and self.gradient_checkpointing:
 
                 def create_custom_forward(module):
@@ -917,7 +928,7 @@ class DownBlock2D(nn.Module):
 
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
             else:
-                hidden_states = resnet(hidden_states, temb)
+                hidden_states = resnet(hidden_states, temb, inject_features[f"resnet_{i}"] if inject_features else None, alpha_blend=alpha_blend)
 
             output_states += (hidden_states,)
 
@@ -1365,7 +1376,7 @@ class SimpleCrossAttnDownBlock2D(nn.Module):
                 )
             )
             attentions.append(
-                CrossAttention(
+                Attention(
                     query_dim=out_channels,
                     cross_attention_dim=out_channels,
                     heads=self.num_heads,
@@ -1374,7 +1385,7 @@ class SimpleCrossAttnDownBlock2D(nn.Module):
                     norm_num_groups=resnet_groups,
                     bias=True,
                     upcast_softmax=True,
-                    processor=CrossAttnAddedKVProcessor(),
+                    processor=AttnAddedKVProcessor(),
                 )
             )
         self.attentions = nn.ModuleList(attentions)
@@ -1782,9 +1793,12 @@ class CrossAttnUpBlock2D(nn.Module):
         cross_attention_kwargs=None,
         upsample_size=None,
         attention_mask=None,
+        inject_features=None,
+        self_attention_layers=False,
+        alpha_blend=None,
     ):
         # TODO(Patrick, William) - attention mask is not used
-        for resnet, attn in zip(self.resnets, self.attentions):
+        for i, (resnet, attn) in enumerate(zip(self.resnets, self.attentions)):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
@@ -1809,11 +1823,13 @@ class CrossAttnUpBlock2D(nn.Module):
                     cross_attention_kwargs,
                 )[0]
             else:
-                hidden_states = resnet(hidden_states, temb)
+                hidden_states = resnet(hidden_states, temb, inject_features=inject_features[f"resnet_{i}"] if not self_attention_layers and inject_features else None, alpha_blend=alpha_blend)
                 hidden_states = attn(
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
+                    inject_features=inject_features[f"attention_{i}"] if self_attention_layers and inject_features else None,
+                    alpha_blend=alpha_blend,
                 ).sample
 
         if self.upsamplers is not None:
@@ -1871,8 +1887,8 @@ class UpBlock2D(nn.Module):
 
         self.gradient_checkpointing = False
 
-    def forward(self, hidden_states, res_hidden_states_tuple, temb=None, upsample_size=None):
-        for resnet in self.resnets:
+    def forward(self, hidden_states, res_hidden_states_tuple, temb=None, upsample_size=None, inject_features=None, self_attention_layers=False, alpha_blend=None):
+        for i, resnet in enumerate(self.resnets):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
             res_hidden_states_tuple = res_hidden_states_tuple[:-1]
@@ -1888,7 +1904,7 @@ class UpBlock2D(nn.Module):
 
                 hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(resnet), hidden_states, temb)
             else:
-                hidden_states = resnet(hidden_states, temb)
+                hidden_states = resnet(hidden_states, temb, inject_features[f"resnet_{i}"] if inject_features else None, alpha_blend=alpha_blend)
 
         if self.upsamplers is not None:
             for upsampler in self.upsamplers:
@@ -2358,7 +2374,7 @@ class SimpleCrossAttnUpBlock2D(nn.Module):
                 )
             )
             attentions.append(
-                CrossAttention(
+                Attention(
                     query_dim=out_channels,
                     cross_attention_dim=out_channels,
                     heads=self.num_heads,
@@ -2367,7 +2383,7 @@ class SimpleCrossAttnUpBlock2D(nn.Module):
                     norm_num_groups=resnet_groups,
                     bias=True,
                     upcast_softmax=True,
-                    processor=CrossAttnAddedKVProcessor(),
+                    processor=AttnAddedKVProcessor(),
                 )
             )
         self.attentions = nn.ModuleList(attentions)
@@ -2677,7 +2693,7 @@ class KAttentionBlock(nn.Module):
         # 1. Self-Attn
         if add_self_attention:
             self.norm1 = AdaGroupNorm(temb_channels, dim, max(1, dim // group_size))
-            self.attn1 = CrossAttention(
+            self.attn1 = Attention(
                 query_dim=dim,
                 heads=num_attention_heads,
                 dim_head=attention_head_dim,
@@ -2689,7 +2705,7 @@ class KAttentionBlock(nn.Module):
 
         # 2. Cross-Attn
         self.norm2 = AdaGroupNorm(temb_channels, dim, max(1, dim // group_size))
-        self.attn2 = CrossAttention(
+        self.attn2 = Attention(
             query_dim=dim,
             cross_attention_dim=cross_attention_dim,
             heads=num_attention_heads,
